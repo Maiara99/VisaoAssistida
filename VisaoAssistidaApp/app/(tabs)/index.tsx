@@ -1,6 +1,7 @@
+// App.tsx
 import React from 'react';
 import { SafeAreaView, StyleSheet } from 'react-native';
-import CameraView from './components/CameraView';
+import CameraView from '../../components/CameraView'; 
 
 export default function App() {
   return (
