@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "vision-aid",
-    "slug": "vision-aid",
+    "name": "VisaoAssistidaApp",
+    "slug": "VisaoAssistidaApp",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "visionaid",
+    "scheme": "visaoAssistidaApp",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
