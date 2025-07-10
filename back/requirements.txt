@@ -4,3 +4,5 @@ fastapi
 uvicorn
 python-socketio
 numpy
+pyzbar
+Pillow

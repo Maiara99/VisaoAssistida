@@ -6,15 +6,54 @@ import uvicorn
 import time
 import hashlib
 import logging
+import json
 from fastapi import FastAPI
 from ultralytics import YOLO
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from pyzbar import pyzbar
+from PIL import Image
 
 # --- CONFIGURAÇÃO INICIAL ---
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Dados das linhas de ônibus da UFMG
+BUS_LINES_DATA = {
+    "1": {
+        "numero": "1",
+        "nome": "Antônio Carlos - Fafich",
+        "empresa": "UFMG - Interno",
+        "tarifa": 0,
+        "horarios": ["06:30", "06:35", "06:40", "06:50", "07:10", "07:30", "07:35", "07:40", "07:50"],
+        "pontos_principais": ["Escola de Música", "Belas Artes", "CAD 2", "Letras", "Ciência da Informação", "FAFICH", "FACE", "Reitoria", "Praça de Serviços", "Biblioteca Universitária"]
+    },
+    "2": {
+        "numero": "2",
+        "nome": "Antônio Carlos - FACE",
+        "empresa": "UFMG - Interno",
+        "tarifa": 0,
+        "horarios": ["06:55", "07:30", "08:10", "08:05", "08:20", "08:30", "08:50"],
+        "pontos_principais": ["Escola de Música", "Belas Artes", "CAD 2", "Letras", "Ciência da Informação", "FAFICH", "FACE", "Reitoria", "Praça de Serviços", "Biblioteca Universitária", "EEFFTO"]
+    },
+    "3": {
+        "numero": "3",
+        "nome": "Carlos Luz - Fafich",
+        "empresa": "UFMG - Interno",
+        "tarifa": 0,
+        "horarios": ["06:40", "07:20", "08:00", "08:20", "08:20", "09:00", "09:20"],
+        "pontos_principais": ["Escola de Música", "Belas Artes", "Creche", "Centro Pedagógico", "FAE", "Setorial I", "Geociências", "Engenharia", "Praça de Serviços", "FAFICH"]
+    },
+    "4": {
+        "numero": "4",
+        "nome": "BH Tec",
+        "empresa": "UFMG - Interno",
+        "tarifa": 0,
+        "horarios": ["07:00", "07:20", "08:05", "09:00", "09:40", "09:50", "10:40"],
+        "pontos_principais": ["Escola de Música", "Belas Artes", "Creche", "Centro Pedagógico", "FAE", "Engenharia", "Reitoria", "BH Tec", "EEFFTO", "McDonald's"]
+    }
+}
 
 # Carrega o modelo YOLO
 model = YOLO('yolov8n.pt')
@@ -87,6 +126,51 @@ async def clear_cache():
     logger.info("Cache limpo manualmente")
     return {"status": "ok", "message": "Cache limpo com sucesso"}
 
+# Endpoint para processar QR codes
+@app.post("/process-qrcode")
+async def process_qrcode_endpoint(data: dict):
+    """
+    Endpoint REST para processar QR codes de imagens
+    """
+    try:
+        # Decodifica a imagem base64
+        image_data = base64.b64decode(data['image'])
+        nparr = np.frombuffer(image_data, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if frame is None:
+            return {"error": "Não foi possível decodificar a imagem"}
+        
+        # Processa QR codes
+        qr_results = decode_qr_codes(frame)
+        
+        if not qr_results:
+            return {
+                "qr_codes_found": False,
+                "message": "Nenhum QR code encontrado na imagem"
+            }
+        
+        # Processa informações das linhas de ônibus
+        bus_info_results = []
+        for qr_result in qr_results:
+            bus_info = get_bus_line_info(qr_result['data'])
+            bus_info_results.append({
+                "qr_data": qr_result['data'],
+                "bus_info": bus_info,
+                "onibusInfo": bus_info,  # Atributo adicional para facilitar acesso
+                "bbox": qr_result['bbox']
+            })
+        
+        return {
+            "qr_codes_found": True,
+            "total_qr_codes": len(qr_results),
+            "results": bus_info_results
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro no processamento de QR code: {e}")
+        return {"error": f"Erro no processamento: {str(e)}"}
+
 # Monta o Socket.IO depois dos endpoints REST
 app.mount("/", socket_app)
 
@@ -147,6 +231,105 @@ def manage_cache(image_hash, results):
         del result_cache[oldest_key]
     
     result_cache[image_hash] = results
+
+def decode_qr_codes(image_array):
+    """
+    Decodifica QR codes de uma imagem
+    """
+    try:
+        # Converte para PIL Image se necessário
+        if isinstance(image_array, np.ndarray):
+            image = Image.fromarray(image_array)
+        else:
+            image = image_array
+            
+        # Decodifica QR codes
+        qr_codes = pyzbar.decode(image)
+        
+        results = []
+        for qr_code in qr_codes:
+            # Decodifica os dados do QR code
+            qr_data = qr_code.data.decode('utf-8')
+            qr_type = qr_code.type
+            
+            # Obtém as coordenadas do QR code
+            points = qr_code.polygon
+            if len(points) == 4:
+                bbox = [
+                    min([p.x for p in points]),
+                    min([p.y for p in points]),
+                    max([p.x for p in points]),
+                    max([p.y for p in points])
+                ]
+            else:
+                # Fallback para rect se polygon não tiver 4 pontos
+                rect = qr_code.rect
+                bbox = [rect.left, rect.top, rect.left + rect.width, rect.top + rect.height]
+            
+            results.append({
+                'data': qr_data,
+                'type': qr_type,
+                'bbox': bbox,
+                'confidence': 1.0  # QR codes têm alta confiança quando detectados
+            })
+            
+        return results
+    except Exception as e:
+        logger.error(f"Erro ao decodificar QR codes: {e}")
+        return []
+
+def get_bus_line_info(qr_data):
+    """
+    Busca informações da linha de ônibus baseado nos dados do QR code
+    """
+    try:
+        # Tenta diferentes formatos de QR code
+        bus_number = None
+        
+        # Formato 1: Apenas o número da linha
+        if qr_data.isdigit() or qr_data.replace('-', '').replace('_', '').isalnum():
+            bus_number = qr_data.upper()
+        
+        # Formato 2: JSON com informações da linha
+        elif qr_data.startswith('{'):
+            try:
+                qr_json = json.loads(qr_data)
+                bus_number = qr_json.get('linha', qr_json.get('numero', qr_json.get('line')))
+            except json.JSONDecodeError:
+                pass
+        
+        # Formato 3: URL com parâmetros
+        elif 'linha=' in qr_data or 'bus=' in qr_data:
+            # Extrai número da linha de uma URL
+            for param in qr_data.split('&'):
+                if 'linha=' in param:
+                    bus_number = param.split('=')[1]
+                    break
+                elif 'bus=' in param:
+                    bus_number = param.split('=')[1]
+                    break
+        
+        # Busca nos dados das linhas
+        if bus_number and bus_number in BUS_LINES_DATA:
+            return BUS_LINES_DATA[bus_number]
+        
+        # Se não encontrou nos dados, retorna informação básica
+        return {
+            "numero": bus_number or qr_data,
+            "nome": "Linha não encontrada na base de dados",
+            "empresa": "Consulte a empresa de transporte",
+            "tarifa": "Consulte valor atual",
+            "horarios": ["Consulte horários"],
+            "pontos_principais": ["Informações não disponíveis"],
+            "qr_data_original": qr_data
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao processar dados da linha: {e}")
+        return {
+            "erro": f"Erro ao processar QR code: {str(e)}",
+            "qr_data_original": qr_data
+        }
 
 # --- LÓGICA DO WEBSOCKET ---
 
@@ -217,6 +400,21 @@ async def process_frame(sid, data):
         # Executar detecção YOLO
         detections = process_yolo_detection(frame)
         
+        # Decodificar QR codes
+        qr_codes = decode_qr_codes(frame)
+        
+        # Buscar informações das linhas de ônibus para cada QR code detectado
+        for qr_code in qr_codes:
+            qr_data = qr_code['data']
+            bus_line_info = get_bus_line_info(qr_data)
+            
+            # Adicionar informações da linha de ônibus às detecções
+            detections.append({
+                'onibusInfo': bus_line_info,
+                'confidence': 1.0,
+                'box': qr_code['bbox']
+            })
+        
         processing_time = time.time() - start_time
         logger.info(f"Frame processado em {processing_time:.2f}s para cliente {sid}")
         
@@ -241,9 +439,68 @@ async def process_frame(sid, data):
         logger.error(f"Erro ao processar o quadro: {e}")
         await sio.emit('detection_error', {'error': str(e)}, to=sid)
 
+# Evento específico para processar QR codes
+@sio.event
+async def process_qrcode(sid, data):
+    """
+    Evento específico para processar QR codes via WebSocket
+    """
+    try:
+        current_time = time.time()
+        logger.info(f"Processando QR code para cliente {sid}")
+        
+        # Extrai os dados da imagem da string base64
+        if "," in data:
+            header, encoded = data.split(",", 1)
+        else:
+            encoded = data
+        
+        img_bytes = base64.b64decode(encoded)
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if frame is None:
+            await sio.emit('qrcode_error', {'error': 'Não foi possível decodificar a imagem'}, to=sid)
+            return
+        
+        # Processar QR codes
+        qr_codes = decode_qr_codes(frame)
+        
+        if not qr_codes:
+            await sio.emit('qrcode_results', {
+                'qr_codes_found': False,
+                'message': 'Nenhum QR code encontrado na imagem'
+            }, to=sid)
+            return
+        
+        # Processar informações das linhas de ônibus
+        bus_info_results = []
+        for qr_code in qr_codes:
+            bus_info = get_bus_line_info(qr_code['data'])
+            bus_info_results.append({
+                'qr_data': qr_code['data'],
+                'bus_info': bus_info,
+                'onibusInfo': bus_info,  # Atributo adicional para facilitar acesso
+                'bbox': qr_code['bbox']
+            })
+        
+        results = {
+            'qr_codes_found': True,
+            'total_qr_codes': len(qr_codes),
+            'results': bus_info_results,
+            'timestamp': current_time
+        }
+        
+        await sio.emit('qrcode_results', results, to=sid)
+        logger.info(f"QR codes processados para cliente {sid}: {len(qr_codes)} códigos encontrados")
+        
+    except Exception as e:
+        logger.error(f"Erro no processamento de QR code: {e}")
+        await sio.emit('qrcode_error', {'error': f'Erro no processamento: {str(e)}'}, to=sid)
+
 # --- INICIALIZAÇÃO DO SERVIDOR ---
 if __name__ == "__main__":
     print("Iniciando servidor Socket.IO...")
-    print("Servidor rodando em: http://localhost:5004")
+    print("Servidor rodando em: http://localhost:8000")
     print("Para parar o servidor, pressione Ctrl+C")
-    uvicorn.run(app, host="0.0.0.0", port=5004)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
